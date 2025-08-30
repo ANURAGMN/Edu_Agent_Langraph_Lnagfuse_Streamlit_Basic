@@ -1,0 +1,3 @@
+educational_agent
+studio_app
+tester_agent
