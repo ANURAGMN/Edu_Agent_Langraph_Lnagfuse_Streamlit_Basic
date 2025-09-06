@@ -1,6 +1,5 @@
 import json
 from typing import Literal, Optional, Dict
-
 from pydantic import BaseModel,Field
 from langchain.output_parsers import PydanticOutputParser
 from educational_agent.config_rag import concept_pkg
@@ -18,10 +17,10 @@ from educational_agent.shared_utils import (
     build_prompt_from_template,
     get_ground_truth,
 )
-
+#check
 PEDAGOGICAL_MOVES: Dict[str, Dict[str, str]] = {
     "APK": {
-        "goal": "Activate prior knowledge; pose a hook linking the concept to everyday intuition.",
+        "goal": "Activat prior knowledge; pose a hook linking the concept to everyday intuition.",
         "constraints": "Do not reveal definitions or answers; question must be common-sense answerable."
     },  
     "CI": {
