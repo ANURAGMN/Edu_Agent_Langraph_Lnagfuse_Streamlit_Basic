@@ -1,7 +1,7 @@
 import json
 from typing import Literal, Optional, Dict
 
-from pydantic import BaseModel,Field
+from pydantic import BaseModel
 from langchain.output_parsers import PydanticOutputParser
 from educational_agent.config_rag import concept_pkg
 from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
@@ -62,64 +62,29 @@ class ApkResponse(BaseModel):
     next_state: Literal["CI", "APK"]
 
 class CiResponse(BaseModel):
-    feedback: str = Field(
-        ...,
-        description=(
-            "This feedback is directly injected into the conversation, so it must continue naturally from the previous messages. "
-            "You will be given the conversation history in the prompt; ensure your feedback maintains continuity and feels like a direct response to the student."
-        )
-    )
-    next_state: Literal["GE", "CI"]
+    feedback: str
+    next_state: Literal["CI","SIM_CC"]
 
 class GeResponse(BaseModel):
-    feedback: str = Field(
-            ...,
-            description=(
-                "This feedback is directly injected into the conversation, so it must continue naturally from the previous messages. "
-                "You will be given the conversation history in the prompt; ensure your feedback maintains continuity and feels like a direct response to the student."
-            )
-        )
-    next_state: Literal["MH", "AR"]
+    feedback: str
+    next_state: Literal["MH", "AR", "GE"]
     correction: Optional[str] = None
 
 class MhResponse(BaseModel):
-    feedback: str = Field(
-        ...,
-        description=(
-            "This feedback is directly injected into the conversation, so it must continue naturally from the previous messages. "
-            "You will be given the conversation history in the prompt; ensure your feedback maintains continuity and feels like a direct response to the student."
-        )
-    )
+    feedback: str
     next_state: Literal["MH", "AR"]
 
 class ArResponse(BaseModel):
     score: float
-    feedback: str = Field(
-        ...,
-        description=(
-            "This feedback is directly injected into the conversation, so it must continue naturally from the previous messages. "
-            "You will be given the conversation history in the prompt; ensure your feedback maintains continuity and feels like a direct response to the student."
-        )
-    )
+    feedback: str
+    next_state: Literal["GE", "TC"]
 
 class TcResponse(BaseModel):
     correct: bool
-    feedback: str = Field(
-        ...,
-        description=(
-            "This feedback is directly injected into the conversation, so it must continue naturally from the previous messages. "
-            "You will be given the conversation history in the prompt; ensure your feedback maintains continuity and feels like a direct response to the student."
-        )
-    )
+    feedback: str
 
 class RlcResponse(BaseModel):
-    feedback: str = Field(
-        ...,
-        description=(
-            "This feedback is directly injected into the conversation, so it must continue naturally from the previous messages. "
-            "You will be given the conversation history in the prompt; ensure your feedback maintains continuity and feels like a direct response to the student."
-        )
-    )
+    feedback: str
     next_state: Literal["RLC", "END"]
 
 # ─── Parsers ───────────────────────────────────────────────────────────────────
@@ -151,7 +116,7 @@ def start_node(state: AgentState) -> AgentState:
         include_instructions=False
     )
     
-    # print("IN START NODE")
+    print("IN START NODE")
     resp = llm_with_history(state, final_prompt)
     # Apply JSON extraction in case LLM wraps response in markdown
     content = extract_json_block(resp.content) if resp.content.strip().startswith("```") else resp.content
@@ -383,13 +348,13 @@ def ci_node(state: AgentState) -> AgentState:
         print("=" * 80)
         
         state["agent_output"] = content
-        state["current_state"] = "GE"
+        state["current_state"] = "SIM_CC"
         return state
 
     context = json.dumps(PEDAGOGICAL_MOVES["CI"], indent=2)
     system_prompt = f"""Current node: CI (Concept Introduction)
 Possible next_state values:
-- "GE": when the student's paraphrase accurately captures the definition.
+- "SIM_CC": when the student's paraphrase accurately captures the definition and we need to identify key concepts for exploration.
 - "CI": when the paraphrase is inaccurate or incomplete.
 
 Pedagogical context:
@@ -397,7 +362,7 @@ Pedagogical context:
 
 This is attempt {state["_ci_tries"]} for the student. If they get it wrong this time, we'll provide the correct definition and move on.
 
-Task: Determine if the restatement is accurate. Respond ONLY with JSON matching the schema above. If not, help the student to do so."""
+Task: Determine if the restatement is accurate. If accurate, move to SIM_CC to identify concepts for exploration. Respond ONLY with JSON matching the schema above. If not, help the student to do so."""
 
     # Build final prompt using template with instructions at the end
     final_prompt = build_prompt_from_template(
@@ -436,14 +401,35 @@ Task: Determine if the restatement is accurate. Respond ONLY with JSON matching 
     return state
 
 def ge_node(state: AgentState) -> AgentState:
+    # Check if we're coming from AR after finishing a concept
+    if state.get("in_simulation", False):
+        state["in_simulation"] = False
+    
+    # Move to next concept if current concept is done
+    current_idx = state.get("sim_current_idx", 0)
+    concepts = state.get("sim_concepts", [])
+    
     if not state.get("_asked_ge", False):
         state["_asked_ge"] = True
-        # Include ground truth for Details (facts, sub-concepts)
-        gt = get_ground_truth(concept_pkg.title, "Details (facts, sub-concepts)")
-        system_prompt = (
-            f"Please use the following ground truth as a baseline and build upon it, but do not deviate too much.\n"
-            f"Ground truth (Details):\n{gt}\nGenerate one 'why' or 'how' question to explore the mechanism of '{concept_pkg.title}'.",
-        )
+        
+        # Check if we have concepts to explore
+        if concepts and current_idx < len(concepts):
+            current_concept = concepts[current_idx]
+            # Include ground truth for Details (facts, sub-concepts)
+            gt = get_ground_truth(concept_pkg.title, "Details (facts, sub-concepts)")
+            system_prompt = (
+                f"Please use the following ground truth as a baseline and build upon it, but do not deviate too much.\n"
+                f"Ground truth (Details):\n{gt}\n\n"
+                f"We are now exploring concept {current_idx + 1} of {len(concepts)}: '{current_concept}'.\n"
+                f"Generate one 'why' or 'how' question to explore the mechanism of this specific concept within '{concept_pkg.title}'."
+            )
+        else:
+            # No concepts yet, ask general question
+            gt = get_ground_truth(concept_pkg.title, "Details (facts, sub-concepts)")
+            system_prompt = (
+                f"Please use the following ground truth as a baseline and build upon it, but do not deviate too much.\n"
+                f"Ground truth (Details):\n{gt}\nGenerate one 'why' or 'how' question to explore the mechanism of '{concept_pkg.title}'."
+            )
         
         # Build final prompt using template
         final_prompt = build_prompt_from_template(
@@ -467,16 +453,28 @@ def ge_node(state: AgentState) -> AgentState:
         print(f"📄 CONTENT: {content}")
         print(f"📏 CONTENT_LENGTH: {len(content)} characters")
         print(f"🔧 USED_JSON_EXTRACTION: {resp.content.strip().startswith('```')}")
+        print(f"🔢 CURRENT_CONCEPT_IDX: {current_idx}")
+        print(f"📋 CURRENT_CONCEPT: {concepts[current_idx] if concepts and current_idx < len(concepts) else 'None'}")
         print("=" * 80)
         
         state["agent_output"] = content
         return state
 
     context = json.dumps(PEDAGOGICAL_MOVES["GE"], indent=2)
+    current_idx = state.get("sim_current_idx", 0)
+    concepts = state.get("sim_concepts", [])
+    
     system_prompt = f"""Current node: GE (Guided Exploration)
+
+Current status: 
+- Concept {current_idx + 1} of {len(concepts) if concepts else 0}
+- Concept name: {concepts[current_idx] if concepts and current_idx < len(concepts) else 'Unknown'}
+
 Possible next_state values:
 - "MH": if you detect a misconception in the student's reasoning (must include a non-empty "correction" ≤2 sentences).
-- "AR": if the reasoning is correct or there's no misconception.
+- "AR": if the reasoning is correct and we should test this concept.
+- "GE": if you need to ask another question about the same concept.
+
 Choose ONLY from these options
 
 Pedagogical context:
@@ -484,7 +482,7 @@ Pedagogical context:
 
 If the student's response indicates they don't know or are stuck after two attempts, provide the correct explanation in a concise manner and move on to the next state.
 
-Task: Detect misconception or correct reasoning. RESPOND ONLY WITH JSON matching the schema above."""
+Task: Detect misconception, correct reasoning, or need for further exploration. RESPOND ONLY WITH JSON matching the schema above."""
 
     # Build final prompt using template with instructions at the end
     final_prompt = build_prompt_from_template(
@@ -511,11 +509,15 @@ Task: Detect misconception or correct reasoning. RESPOND ONLY WITH JSON matching
         print(f"🚀 NEXT_STATE: {parsed.next_state}")
         print(f"🔧 CORRECTION: {parsed.correction}")
         print(f"📊 PARSED_TYPE: {type(parsed).__name__}")
+        print(f"🔢 CURRENT_CONCEPT_IDX: {current_idx}")
         print("=" * 80)
         
         if parsed.next_state == "MH":
             state["last_correction"] = parsed.correction or "Let me clarify that for you."
-        state["agent_output"]  = parsed.feedback
+        elif parsed.next_state == "SIM_VARS":
+            state["in_simulation"] = True
+        
+        state["agent_output"] = parsed.feedback
         state["current_state"] = parsed.next_state
     except Exception as e:
         print(f"Error parsing GE response: {e}")
@@ -602,7 +604,7 @@ Respond ONLY with a clear, conclusive message (not JSON - just the message text)
         print("=" * 80)
         
         state["agent_output"] = final_response
-        state["current_state"] = "AR"
+        state["current_state"] = "SIM_VARS"  # After max tries, show simulation to help convince student
         return state
     
     # Normal MH processing: evaluate student's response and decide next action
@@ -612,7 +614,7 @@ Respond ONLY with a clear, conclusive message (not JSON - just the message text)
     system_prompt = f"""Current node: MH (Misconception Handling)
 Possible next_state values:
 - "MH": if the student still has doubts, questions, or shows continued misconception (max 2 tries total).
-- "AR": if the student shows understanding or acceptance of the correction.
+- "AR": if the student shows understanding and acceptance of the correction.
 
 Pedagogical context:
 {context}
@@ -623,8 +625,8 @@ This is attempt {state["_mh_tries"]} of 2 for misconception handling.
 
 The student has received a correction for their misconception. Now they have responded. 
 Analyze their response:
-- If they seem to understand and accept the correction, move to AR
-- If they have more questions, doubts, or still show misconception, provide additional clarification and stay in MH
+- If they seem to understand and accept the correction, move to AR for assessment
+- If they still have questions, doubts, or show misconception, provide additional clarification and stay in MH
 - Be encouraging and supportive while addressing their concerns
 
 Task: Evaluate the student's response after receiving misconception correction. Respond ONLY with JSON matching the schema above."""
@@ -670,12 +672,25 @@ def ar_node(state: AgentState) -> AgentState:
     # First pass: generate the quiz
     if not state.get("_asked_ar", False):
         state["_asked_ar"] = True
+        current_idx = state.get("sim_current_idx", 0)
+        concepts = state.get("sim_concepts", [])
+        
         # Include ground truth for MCQs
         gt = get_ground_truth(concept_pkg.title, "MCQs")
-        system_prompt = (
-            f"Please use the following ground truth as a baseline and build upon it, but do not deviate too much.\n"
-            f"Ground truth (MCQs):\n{gt}\nGenerate a short quiz question (T/F, MCQ, or short answer) on '{concept_pkg.title}' and prompt the learner."
-        )
+        
+        if concepts and current_idx < len(concepts):
+            current_concept = concepts[current_idx]
+            system_prompt = (
+                f"Please use the following ground truth as a baseline and build upon it, but do not deviate too much.\n"
+                f"Ground truth (MCQs):\n{gt}\n\n"
+                f"Generate a short quiz question (T/F, MCQ, or short answer) specifically about concept {current_idx + 1}: '{current_concept}' "
+                f"within the topic '{concept_pkg.title}'. Focus the question on this specific concept."
+            )
+        else:
+            system_prompt = (
+                f"Please use the following ground truth as a baseline and build upon it, but do not deviate too much.\n"
+                f"Ground truth (MCQs):\n{gt}\nGenerate a short quiz question (T/F, MCQ, or short answer) on '{concept_pkg.title}' and prompt the learner."
+            )
         
         # Build final prompt using template
         final_prompt = build_prompt_from_template(
@@ -697,21 +712,31 @@ def ar_node(state: AgentState) -> AgentState:
         print(f"📄 CONTENT: {content}")
         print(f"📏 CONTENT_LENGTH: {len(content)} characters")
         print(f"🔧 USED_JSON_EXTRACTION: {resp.content.strip().startswith('```')}")
+        print(f"🔢 CURRENT_CONCEPT_IDX: {current_idx}")
         print("=" * 80)
         
         state["agent_output"] = content
         return state
 
-    # Second pass: grade & either explain or advance
+    # Second pass: grade & decide next step based on concept progress
+    current_idx = state.get("sim_current_idx", 0)
+    concepts = state.get("sim_concepts", [])
+    
     context = json.dumps(PEDAGOGICAL_MOVES["AR"], indent=2)
     system_prompt = f"""Current node: AR (Application & Retrieval)
-Possible next_state values (handled by agent code):
-- "TC": always move forward after feedback/explanation
+
+Current status:
+- Concept {current_idx + 1} of {len(concepts) if concepts else 0}
+- Concept name: {concepts[current_idx] if concepts and current_idx < len(concepts) else 'Unknown'}
+
+Possible next_state values:
+- "GE": if there are more concepts to explore 
+- "TC": if all concepts have been covered and we should move to transfer
 
 Pedagogical context:
 {context}
 
-Task: Grade this answer on a scale from 0 to 1. Respond ONLY with JSON matching the schema above.DO NOT start with any additional text.Direct reply in requested format so I can parse directly."""
+Task: Grade this answer on a scale from 0 to 1 and determine next state. Respond ONLY with JSON matching the schema above."""
 
     # Build final prompt using template with instructions at the end
     final_prompt = build_prompt_from_template(
@@ -734,11 +759,13 @@ Task: Grade this answer on a scale from 0 to 1. Respond ONLY with JSON matching 
         print("=" * 80)
         print(f"📝 FEEDBACK: {parsed.feedback}")
         print(f"📊 SCORE: {parsed.score}")
+        print(f"🚀 NEXT_STATE: {parsed.next_state}")
         print(f"🎯 SCORE_TYPE: {type(parsed.score).__name__}")
         print(f"📊 PARSED_TYPE: {type(parsed).__name__}")
+        print(f"🔢 CURRENT_CONCEPT_IDX: {current_idx}")
         print("=" * 80)
         
-        score, feedback = parsed.score, parsed.feedback
+        score, feedback, next_state = parsed.score, parsed.feedback, parsed.next_state
         
         # Store the quiz score in the state for metrics
         state["quiz_score"] = score * 100  # Convert 0-1 score to 0-100 percentage
@@ -748,11 +775,11 @@ Task: Grade this answer on a scale from 0 to 1. Respond ONLY with JSON matching 
         print(f"Extracted JSON text: {json_text}")
         raise
 
+    # Provide feedback based on score
     if score < 0.5:
-        # Student struggled: give correct answer + explanation, then introduce transfer
+        # Student struggled: give correct answer + explanation
         explain_system_prompt = (
-            "Provide the correct answer to the quiz question, explain why it is correct in 2–3 sentences, "
-            "and then say, Nice work! Time for a transfer question."
+            "Provide the correct answer to the quiz question and explain why it is correct in 2–3 sentences."
         )
         
         # Build final prompt using template
@@ -778,11 +805,26 @@ Task: Grade this answer on a scale from 0 to 1. Respond ONLY with JSON matching 
         
         state["agent_output"] = content
     else:
-        state["agent_output"] = feedback + "\nNice work! Time for a transfer question."
+        state["agent_output"] = feedback
+
+    # Handle concept progression
+    if next_state == "GE":
+        # Move to next concept
+        state["sim_current_idx"] = current_idx + 1
+        state["_asked_ge"] = False  # Reset GE flag for next concept
+        # Add transition message
+        next_concept_idx = current_idx + 1
+        if next_concept_idx < len(concepts):
+            transition_msg = f"\n\nGreat! Now let's explore the next concept: '{concepts[next_concept_idx]}'."
+            state["agent_output"] += transition_msg
+    elif next_state == "TC":
+        # All concepts done, move to transfer
+        state["concepts_completed"] = True
+        completion_msg = "\n\nExcellent! We've covered all the key concepts. Now let's see how you can apply this knowledge in a new context."
+        state["agent_output"] += completion_msg
 
     add_ai_message_to_conversation(state, state["agent_output"])
-
-    state["current_state"] = "TC"
+    state["current_state"] = next_state
     return state
 
 def tc_node(state: AgentState) -> AgentState:
